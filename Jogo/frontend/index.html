@@ -85,7 +85,7 @@ async function persist(){
  const d=DB();if(d[U]){d[U].p=P;W(d)}
  try {
   P.cp = stats().cp | 0;
-  await fetch('http://127.0.0.1:8000/api/save', {
+   await fetch('https://rpg-1-vizh.onrender.com/api/save', {
    method: 'POST',
    headers: { 'Content-Type': 'application/json' },
    body: JSON.stringify({ username: U, player_data: P })
@@ -162,7 +162,7 @@ async function auth(){
 async function enter(u){
  U=u;S.set('eld_ses',u);
  try {
-  const res = await fetch(`http://127.0.0.1:8000/api/load/${u}`);
+  const res = await fetch(`https://rpg-1-vizh.onrender.com/api/load/${u}`);
   const data = await res.json();
   if(data.status === 'encontrado' && data.player_data) P = data.player_data;
   else P = DB()[u]?DB()[u].p:null;
@@ -317,7 +317,7 @@ const ACH=[['Aprendiz','Chegue ao nível 5',p=>p.level>=5],['Veterano','Chegue a
 function rankT(){
  setTimeout(async () => {
   try {
-   const res = await fetch('http://127.0.0.1:8000/api/ranking');
+   const res = await fetch('https://rpg-1-vizh.onrender.com/api/ranking');
    const serverRank = await res.json();
    let L = serverRank.map(x => ({n: x.n, u: x.u, i: CLS[x.cls]?CLS[x.cls].i:'👤', l: x.l, cp: x.cp, me: x.u === U}));
    L = L.concat(NPC.map(([n,k,l,cp])=>({n,u:'',i:CLS[k].i,l,cp,me:false})));
