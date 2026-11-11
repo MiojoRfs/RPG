@@ -9,8 +9,10 @@ from sqlalchemy.orm import declarative_base, sessionmaker, Session
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./eldoria.db")
 
 # Ajuste necessário para o SQLAlchemy entender algumas URLs do Postgres
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+# Força o uso do psycopg2 independente de como a URL veio do Supabase
+if DATABASE_URL.startswith("postgres"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg2://", 1)
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://", 1))
 
 # Remove o connect_args do SQLite se estiver rodando no Postgres
 if "sqlite" in DATABASE_URL:
