@@ -81,7 +81,7 @@ const DB=()=>{try{return JSON.parse(S.get('eld_db')||'{}')}catch(e){return{}}},W
 
 /* ===== Integração com Servidor Python ===== */
 const AH=()=>({'Content-Type':'application/json','Authorization':'Bearer '+TOK});
-function kick(msg){clearInterval(T);S.del('eld_tok');S.del('eld_ses');TOK=null;U=P=null;mode='in';authScreen();const e=$('#err');if(e)e.textContent=msg}
+function kick(msg){clearInterval(T);S.del('eld_tok');S.del('eld_ses');TOK=null;ADM=false;U=P=null;mode='in';authScreen();const e=$('#err');if(e)e.textContent=msg}
 async function persist(){
  if(!U||!P)return;
  const d=DB();d[U]=d[U]||{};d[U].p=P;W(d);
@@ -89,7 +89,9 @@ async function persist(){
   P.cp = stats().cp | 0;
   const res = await fetch(SRV+'/api/save', {method:'POST',headers:AH(),body:JSON.stringify({username:U,player_data:P}),keepalive:true});
   if(res.status===401)kick('Sua conta foi aberta em outro lugar ou a sessão expirou. Entre novamente.');
+  else if(res.status===403){const j=await res.json().catch(()=>({}));kick(j.detail||'Conta bloqueada.')}
   else if(!res.ok)console.warn('Falha ao salvar no servidor:',res.status);
+  else{const j=await res.json().catch(()=>({}));if(j.updated&&P){const k=P.last;Object.assign(P,j.updated);P.last=k;toast('🛠️ O administrador atualizou sua conta.');refresh()}}
  } catch(e) { console.warn('Servidor indisponível, salvo só localmente.', e); }
 }
 
@@ -119,7 +121,7 @@ const HT=[
 const TABS=[['treino','🎯','Treinamento'],['cacar','🐺','Caça e farm'],['inv','🎒','Inventário'],['attr','📜','Atributos'],['loja','🛒','Loja'],['ferr','⚒️','Ferreiro'],['rank','🏆','Ranking']];
 
 /* ===== Estado ===== */
-let U=null,P=null,T=null,tab='treino',mode='in',pick=null,dirty=false,TOK=S.get('eld_tok');
+let U=null,P=null,T=null,tab='treino',mode='in',pick=null,dirty=false,TOK=S.get('eld_tok'),ADM=false;
 const need=(l=P.level)=>Math.floor(100*1.35**(l-1));
 
 function stats(){
@@ -167,7 +169,9 @@ async function enter(u){
  try {
   const res = await fetch(`${SRV}/api/load/${u}`,{headers:AH()});
   if(res.status===401)return kick('Sessão expirada. Entre novamente.');
+  if(res.status===403){const j=await res.json().catch(()=>({}));return kick(j.detail||'Conta bloqueada.')}
   const data = await res.json();
+  ADM=!!data.admin;
   const remote = (data.status === 'encontrado' && data.player_data) ? data.player_data : null;
   const local = DB()[u] ? DB()[u].p : null;
   // usa o save mais novo (campo "last"), em vez de sempre confiar no servidor
@@ -181,7 +185,7 @@ async function enter(u){
  if(Date.now()-t0>6e4&&P.act)toast('⏳ Enquanto você esteve fora: +'+Math.floor(P.gold-g)+' ouro e +'+(P.level-l)+' nível(is).');
  dash();loop();checkNews()
 }
-function logout(){tick();persist();clearInterval(T);S.del('eld_ses');S.del('eld_tok');TOK=null;U=P=null;mode='in';authScreen()}
+function logout(){tick();persist();clearInterval(T);S.del('eld_ses');S.del('eld_tok');TOK=null;ADM=false;U=P=null;mode='in';authScreen()}
 
 /* ===== Seleção de classe ===== */
 function classScreen(){
@@ -206,7 +210,7 @@ const bar=(id,bg)=>`<div class="bar"><i id="${id}" style="background:${bg}"></i>
 const sb=(id,v,m)=>{$('#'+id).style.width=Math.min(100,v/m*100)+'\%';$('#'+id+'t').textContent=Math.floor(v)+' / '+Math.floor(m)};
 const rates=z=>{const s=stats();return`<span>✨ XP +${f(z.xp*s.xm)}/s</span>`+(z.g?`<span>💰 Ouro +${f(z.g*s.gm)}/s</span><span>❤️ Vida −${f(z.dg*s.vr*risk(z)/100,2)}/s</span>${rk(z)}`:'')};
 function dash(){
- $('#app').innerHTML=`<header class="flex items-center justify-between mb-4"><h1 class="fd text-xl sm:text-2xl gold">🏰 Crônicas de Eldoria</h1><div class="flex items-center gap-3"><span class="mut hidden sm:inline">${U}</span><button class="btn sm" onclick="showNews()" title="Novidades e status do servidor">📜</button><button class="btn sm" id="snd" onclick="togSnd()">${snd?'🔊':'🔇'}</button><button class="btn sm" onclick="logout()">Sair</button></div></header>
+ $('#app').innerHTML=`<header class="flex items-center justify-between mb-4"><h1 class="fd text-xl sm:text-2xl gold">🏰 Crônicas de Eldoria</h1><div class="flex items-center gap-3"><span class="mut hidden sm:inline">${U}</span>${ADM?'<button class="btn sm" onclick="showAdmin()" title="Painel do administrador">🛠️ ADM</button>':''}<button class="btn sm" onclick="showNews()" title="Novidades e status do servidor">📜</button><button class="btn sm" id="snd" onclick="togSnd()">${snd?'🔊':'🔇'}</button><button class="btn sm" onclick="logout()">Sair</button></div></header>
  <div class="grid gap-4 lg:grid-cols-[340px_1fr]"><aside class="panel p-5 h-fit" id="side"></aside><main class="panel p-5 min-w-0"><div id="act"></div><div id="skb" class="flex gap-2 mt-2"></div><nav class="flex gap-2 overflow-x-auto pb-2 my-3" id="tabs"></nav><section id="tab"></section><h3 class="fd gold mt-5 mb-1">Registro de combate</h3><div id="log" class="row p-3 h-40 overflow-y-auto"></div></main></div>`;
  refresh()
 }
@@ -351,9 +355,10 @@ addEventListener('visibilitychange',()=>{if(P){tick();persist()}});
 addEventListener('pagehide',()=>{if(P){tick();persist()}});
 for(let i=0;i<16;i++){const e=document.createElement('i'),z=2+Math.random()*3;e.className='ember';e.style.cssText=`left:${Math.random()*100}%;width:${z}px;height:${z}px;animation-duration:${7+Math.random()*9}s;animation-delay:${-Math.random()*12}s`;document.body.append(e)}
 /* ===== Novidades / status do servidor ===== */
-const SRV='https://rpg-1-vizh.onrender.com',VERSION='1.2.0';
+const SRV='https://rpg-1-vizh.onrender.com',VERSION='1.3.0';
 // Para cada atualização: aumente VERSION e adicione uma linha NO TOPO desta lista
 const NEWS=[
+ ['1.3.0','11/11/2026',['Moderação: contas banidas somem do ranking e não conseguem entrar','O administrador pode devolver itens e ouro a quem perdeu progresso']],
  ['1.2.0','11/11/2026',['Senha agora fica no servidor: dá para entrar de qualquer aparelho','Contas antigas: a primeira senha digitada passa a valer','Abrir a conta em outro lugar encerra a sessão anterior (evita sobrescrever o progresso)']],
  ['1.1.0','11/11/2026',['Correção: o progresso não volta mais ao sair do jogo','Salvamento mais seguro (usa sempre o save mais novo)','Novo painel de novidades e status do servidor']]
 ];
@@ -379,6 +384,66 @@ async function checkNews(){
   const v=await(await fetch(SRV+'/api/version')).json(),k=v.version+'|'+v.commit,o=S.get('eld_srv');S.set('eld_srv',k);
   if(o&&o!==k)toast('🛠️ Servidor atualizado (v'+v.version+', commit '+v.commit+')');
  }catch(e){}
+}
+
+/* ===== Painel do administrador ===== */
+let admSel=null;
+async function adm(path,body){
+ const r=await fetch(SRV+'/api/admin/'+path,{method:body?'POST':'GET',headers:AH(),body:body?JSON.stringify(body):undefined});
+ const j=await r.json().catch(()=>({}));
+ if(!r.ok)throw new Error(typeof j.detail==='string'?j.detail:'Erro '+r.status);
+ return j;
+}
+const admV=id=>(($('#'+id)||{}).value||'');
+function showAdmin(){
+ let m=$('#admm');if(m)m.remove();
+ m=document.createElement('div');m.id='admm';
+ m.style.cssText='position:fixed;inset:0;z-index:49;display:grid;place-items:center;padding:1rem;background:#000d';
+ m.onclick=e=>{if(e.target===m)m.remove()};
+ m.innerHTML=`<div class='panel p-5 w-full max-w-2xl' style='max-height:90vh;overflow:auto'><div class='flex justify-between items-center mb-3'><h3 class='fd gold text-xl'>🛠️ Painel do administrador</h3><button class='btn sm' onclick='$("#admm").remove()'>Fechar</button></div><div class='flex gap-2 mb-3'><input id='admq' class='inp' placeholder='Buscar jogador...' onkeydown='if(event.key==="Enter")admList()'><button class='btn' onclick='admList()'>Buscar</button></div><div id='admc'></div></div>`;
+ document.body.append(m);admList();
+}
+async function admList(){
+ const c=$('#admc');if(!c)return;admSel=null;c.innerHTML='<p class="mut">Carregando...</p>';
+ try{
+  const L=await adm('players?q='+encodeURIComponent(admV('admq')));
+  c.innerHTML=L.length?`<div class='space-y-1'>${L.map(x=>`<div class='flex items-center gap-3 p-2 row'><div class='flex-1 min-w-0'>${esc(x.u)}${x.admin?' 👑':''}${x.banned?' <span class="ld">BANIDO</span>':''}</div><span class='mut'>Nv ${x.l}</span><b class='gold w-20 text-right'>${(x.cp||0).toLocaleString('pt-BR')}</b><button class='btn sm' onclick='admOpen("${esc(x.u)}")'>Abrir</button></div>`).join('')}</div>`:'<p class="mut">Nenhum jogador.</p>';
+ }catch(e){c.innerHTML=`<p class='ld'>${esc(e.message)}</p>`}
+}
+async function admOpen(u){
+ const c=$('#admc');if(!c)return;admSel=u;c.innerHTML='<p class="mut">Carregando...</p>';
+ try{
+  const j=await adm('player/'+encodeURIComponent(u)),d=j.data||{},inv=Object.entries(d.inv||{}).filter(([,q])=>q>0),eqp=Object.values(d.eq||{}).filter(Boolean);
+  const nm=id=>IT[id]?IT[id].i+' '+IT[id].n:esc(id);
+  const opts=Object.keys(IT).map(k=>`<option value='${k}'>${esc(IT[k].n)}${IT[k].r?' ('+RN[IT[k].r]+')':''}</option>`).join('');
+  const row=(t,h)=>`<div class='p-3 row mb-2'><div class='text-sm gold mb-1'>${t}</div><div class='flex flex-wrap gap-2 items-center'>${h}</div></div>`;
+  c.innerHTML=`<button class='btn sm mb-3' onclick='admList()'>← Voltar</button>
+  <div class='p-3 row mb-3'><b class='fd gold text-lg'>${esc(j.username)}</b>${j.banned?` <span class='ld'>BANIDO</span><div class='text-sm' style='color:#ff6a5a'>${esc(j.ban_msg)}</div>`:''}
+  <div class='text-sm mut'>${d.cls?(CLS[d.cls]?CLS[d.cls].n:d.cls)+' · ':''}Nv ${d.level||'-'} · 💰 ${Math.floor(d.gold||0).toLocaleString('pt-BR')} · pontos livres ${d.pts||0}${j.pending?` · ⏳ ${j.pending} ação(ões) pendente(s)`:''}</div>
+  <div class='text-sm mt-1'>Equipado: ${eqp.length?eqp.map(nm).join(', '):'nada'}</div>
+  <div class='text-sm mt-1'>Mochila: ${inv.length?inv.map(([id,q])=>nm(id)+' ×'+q).join(', '):'vazia'}</div></div>
+  ${row('Item',`<select id='admi' class='inp' style='width:auto;max-width:100%'>${opts}</select><input id='admqty' type='number' min='1' value='1' class='inp' style='width:6rem'><button class='btn sm' onclick='admAct("item",1)'>Dar</button><button class='btn sm' onclick='admAct("item",-1)'>Remover</button>`)}
+  ${row('Ouro',`<input id='admg' type='number' min='1' value='1000' class='inp' style='width:9rem'><button class='btn sm' onclick='admAct("gold",1)'>Dar</button><button class='btn sm' onclick='admAct("gold",-1)'>Tirar</button>`)}
+  ${row('Nível (zera o XP do nível; ao subir, dá +3 pontos por nível)',`<input id='adml' type='number' min='1' value='${d.level||1}' class='inp' style='width:6rem'><button class='btn sm' onclick='admAct("level")'>Definir</button>`)}
+  ${row('Banimento',`<input id='admr' class='inp' placeholder='Motivo' style='width:12rem'><input id='admh' type='number' min='0' placeholder='Horas (0 = permanente)' class='inp' style='width:12rem'><button class='btn sm' onclick='admBan()'>Banir</button><button class='btn sm' onclick='admDo("unban",{username:admSel},"Desbanido.")'>Desbanir</button>`)}
+  ${row('Senha',`<input id='admp' class='inp' placeholder='Nova senha' style='width:12rem'><button class='btn sm' onclick='admPw()'>Redefinir senha</button>`)}
+  ${row('Zona de perigo',`<button class='btn sm' style='border-color:#ff4d4d' onclick='admDel()'>Excluir conta</button>`)}
+  <p class='text-sm mut'>Itens, ouro e nível chegam ao jogador em até 5 s se ele estiver online, ou no próximo login.</p>`;
+ }catch(e){c.innerHTML=`<p class='ld'>${esc(e.message)}</p><button class='btn sm' onclick='admList()'>← Voltar</button>`}
+}
+async function admDo(path,body,msg){try{await adm(path,body);toast('✅ '+msg);admOpen(admSel)}catch(e){toast('⚠️ '+e.message)}}
+function admAct(kind,sg=1){
+ const b={username:admSel,t:kind};
+ if(kind==='item'){b.id=admV('admi');b.q=sg*Math.floor(+admV('admqty')||0)}
+ else if(kind==='gold')b.q=sg*Math.floor(+admV('admg')||0);
+ else b.v=Math.floor(+admV('adml')||0);
+ admDo('action',b,'Ação enfileirada.');
+}
+function admBan(){admDo('ban',{username:admSel,reason:admV('admr'),hours:Math.max(0,Math.floor(+admV('admh')||0))},'Jogador banido.')}
+function admPw(){admDo('set-password',{username:admSel,new_password:admV('admp')},'Senha redefinida.')}
+async function admDel(){
+ if(!confirm('Excluir a conta "'+admSel+'" e todo o progresso? Isso não pode ser desfeito.'))return;
+ try{await adm('delete',{username:admSel});toast('🗑️ Conta excluída.');admList()}catch(e){toast('⚠️ '+e.message)}
 }
 
 const ses=S.get('eld_ses');ses&&TOK?enter(ses):authScreen();
