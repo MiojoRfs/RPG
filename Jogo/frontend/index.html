@@ -80,18 +80,16 @@ const H=async s=>{try{const b=await crypto.subtle.digest('SHA-256',new TextEncod
 const DB=()=>{try{return JSON.parse(S.get('eld_db')||'{}')}catch(e){return{}}},W=d=>S.set('eld_db',JSON.stringify(d));
 
 /* ===== Integração com Servidor Python ===== */
+const AH=()=>({'Content-Type':'application/json','Authorization':'Bearer '+TOK});
+function kick(msg){clearInterval(T);S.del('eld_tok');S.del('eld_ses');TOK=null;U=P=null;mode='in';authScreen();const e=$('#err');if(e)e.textContent=msg}
 async function persist(){
  if(!U||!P)return;
- const d=DB();if(d[U]){d[U].p=P;W(d)}
+ const d=DB();d[U]=d[U]||{};d[U].p=P;W(d);
  try {
   P.cp = stats().cp | 0;
-  const res = await fetch('https://rpg-1-vizh.onrender.com/api/save', {
-   method: 'POST',
-   headers: { 'Content-Type': 'application/json' },
-   body: JSON.stringify({ username: U, player_data: P }),
-   keepalive: true
-  });
-  if(!res.ok) console.warn('Falha ao salvar no servidor:', res.status);
+  const res = await fetch(SRV+'/api/save', {method:'POST',headers:AH(),body:JSON.stringify({username:U,player_data:P}),keepalive:true});
+  if(res.status===401)kick('Sua conta foi aberta em outro lugar ou a sessão expirou. Entre novamente.');
+  else if(!res.ok)console.warn('Falha ao salvar no servidor:',res.status);
  } catch(e) { console.warn('Servidor indisponível, salvo só localmente.', e); }
 }
 
@@ -121,7 +119,7 @@ const HT=[
 const TABS=[['treino','🎯','Treinamento'],['cacar','🐺','Caça e farm'],['inv','🎒','Inventário'],['attr','📜','Atributos'],['loja','🛒','Loja'],['ferr','⚒️','Ferreiro'],['rank','🏆','Ranking']];
 
 /* ===== Estado ===== */
-let U=null,P=null,T=null,tab='treino',mode='in',pick=null,dirty=false;
+let U=null,P=null,T=null,tab='treino',mode='in',pick=null,dirty=false,TOK=S.get('eld_tok');
 const need=(l=P.level)=>Math.floor(100*1.35**(l-1));
 
 function stats(){
@@ -147,24 +145,28 @@ function authScreen(){
  <div class="grid grid-cols-2 gap-2 mb-4"><button class="tab ${mode==='in'?'on':''}" onclick="mode='in';authScreen()">Entrar</button><button class="tab ${mode==='up'?'on':''}" onclick="mode='up';authScreen()">Criar conta</button></div>
  <div class="space-y-3"><input id="u" class="inp" placeholder="Usuário" autocomplete="username" maxlength="16"><input id="pw" type="password" class="inp" placeholder="Senha" autocomplete="${mode==='in'?'current-password':'new-password'}">${mode==='up'?'<input id="pw2" type="password" class="inp" placeholder="Repita a senha" autocomplete="new-password">':''}
  <p id="err" class="text-sm min-h-[1.5rem]" style="color:#e58a78"></p><button class="btn w-full py-2" onclick="auth()">${mode==='in'?'Entrar':'Criar conta'}</button></div>
- <p class="mut text-sm text-center mt-4" style="color:#7fd08a">🌐 Conectado ao Servidor Global. Seu progresso agora é online!</p></div></div>`;
+ <p class="mut text-sm text-center mt-4" style="color:#7fd08a">🌐 Conectado ao Servidor Global. Seu progresso agora é online!</p>${mode==='in'?'<p class="mut text-xs text-center mt-2">Conta antiga, criada antes das senhas online? Entre com a senha que quiser: ela passa a valer a partir do primeiro acesso.</p>':''}</div></div>`;
 }
 async function auth(){
- const u=$('#u').value.trim().toLowerCase(),pw=$('#pw').value,e=$('#err'),d=DB();
+ const u=$('#u').value.trim().toLowerCase(),pw=$('#pw').value,e=$('#err');
  if(!/^[a-z0-9_]{3,16}$/.test(u))return e.textContent='Use de 3 a 16 caracteres: letras, números ou _ no usuário.';
  if(pw.length<4)return e.textContent='A senha precisa ter pelo menos 4 caracteres.';
- const h=await H(pw);
- if(mode==='up'){
-  if(d[u])return e.textContent='Esse usuário já existe. Escolha outro nome.';
-  if(pw!==$('#pw2').value)return e.textContent='As senhas não coincidem.';
-  d[u]={h,p:null};W(d)
- }else if(!d[u]||d[u].h!==h)return e.textContent='Usuário ou senha incorretos.';
+ if(mode==='up'&&pw!==$('#pw2').value)return e.textContent='As senhas não coincidem.';
+ e.textContent='Conectando ao servidor... (pode levar até 1 minuto se ele estiver dormindo)';
+ try{
+  const r=await fetch(SRV+'/api/'+(mode==='up'?'register':'login'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,password:pw})});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok)return e.textContent=(typeof j.detail==='string'?j.detail:'Dados inválidos.');
+  TOK=j.token;S.set('eld_tok',TOK);
+ }catch(x){return e.textContent='Servidor indisponível. Tente de novo em instantes.'}
  enter(u)
 }
 async function enter(u){
+ if(!TOK)return kick('O login mudou: entre novamente com seu usuário e senha.');
  U=u;S.set('eld_ses',u);
  try {
-  const res = await fetch(`https://rpg-1-vizh.onrender.com/api/load/${u}`);
+  const res = await fetch(`${SRV}/api/load/${u}`,{headers:AH()});
+  if(res.status===401)return kick('Sessão expirada. Entre novamente.');
   const data = await res.json();
   const remote = (data.status === 'encontrado' && data.player_data) ? data.player_data : null;
   const local = DB()[u] ? DB()[u].p : null;
@@ -179,7 +181,7 @@ async function enter(u){
  if(Date.now()-t0>6e4&&P.act)toast('⏳ Enquanto você esteve fora: +'+Math.floor(P.gold-g)+' ouro e +'+(P.level-l)+' nível(is).');
  dash();loop();checkNews()
 }
-function logout(){tick();persist();clearInterval(T);S.del('eld_ses');U=P=null;mode='in';authScreen()}
+function logout(){tick();persist();clearInterval(T);S.del('eld_ses');S.del('eld_tok');TOK=null;U=P=null;mode='in';authScreen()}
 
 /* ===== Seleção de classe ===== */
 function classScreen(){
@@ -349,9 +351,10 @@ addEventListener('visibilitychange',()=>{if(P){tick();persist()}});
 addEventListener('pagehide',()=>{if(P){tick();persist()}});
 for(let i=0;i<16;i++){const e=document.createElement('i'),z=2+Math.random()*3;e.className='ember';e.style.cssText=`left:${Math.random()*100}%;width:${z}px;height:${z}px;animation-duration:${7+Math.random()*9}s;animation-delay:${-Math.random()*12}s`;document.body.append(e)}
 /* ===== Novidades / status do servidor ===== */
-const SRV='https://rpg-1-vizh.onrender.com',VERSION='1.1.0';
+const SRV='https://rpg-1-vizh.onrender.com',VERSION='1.2.0';
 // Para cada atualização: aumente VERSION e adicione uma linha NO TOPO desta lista
 const NEWS=[
+ ['1.2.0','11/11/2026',['Senha agora fica no servidor: dá para entrar de qualquer aparelho','Contas antigas: a primeira senha digitada passa a valer','Abrir a conta em outro lugar encerra a sessão anterior (evita sobrescrever o progresso)']],
  ['1.1.0','11/11/2026',['Correção: o progresso não volta mais ao sair do jogo','Salvamento mais seguro (usa sempre o save mais novo)','Novo painel de novidades e status do servidor']]
 ];
 async function showNews(){
@@ -378,7 +381,7 @@ async function checkNews(){
  }catch(e){}
 }
 
-const ses=S.get('eld_ses');DB()[ses]?enter(ses):authScreen();
+const ses=S.get('eld_ses');ses&&TOK?enter(ses):authScreen();
 </script>
 </body>
 </html>
