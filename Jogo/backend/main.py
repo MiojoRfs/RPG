@@ -4,7 +4,7 @@ import time
 import hmac
 import hashlib
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Depends, Header
@@ -41,6 +41,9 @@ class PlayerModel(Base):
     data = Column(JSON)
     pw_hash = Column(String, nullable=True)  # "salt$hash" (PBKDF2)
     token = Column(String, nullable=True)    # token da sessão ativa
+    banned_until = Column(Integer, nullable=True)  # epoch em segundos (2147483647 = permanente)
+    ban_reason = Column(String, nullable=True)
+    pending = Column(JSON, nullable=True)    # ações do administrador esperando o jogador sincronizar
 
 
 Base.metadata.create_all(bind=engine)
@@ -49,10 +52,12 @@ Base.metadata.create_all(bind=engine)
 def migrate():
     """Adiciona as colunas novas em bancos que já existiam (create_all não faz isso)."""
     cols = {c["name"] for c in inspect(engine).get_columns("players")}
+    new_cols = {"pw_hash": "VARCHAR", "token": "VARCHAR", "banned_until": "INTEGER",
+                "ban_reason": "VARCHAR", "pending": "JSON"}
     with engine.begin() as conn:
-        for name in ("pw_hash", "token"):
+        for name, typ in new_cols.items():
             if name not in cols:
-                conn.execute(text(f"ALTER TABLE players ADD COLUMN {name} VARCHAR"))
+                conn.execute(text(f"ALTER TABLE players ADD COLUMN {name} {typ}"))
 
 
 migrate()
@@ -60,11 +65,14 @@ migrate()
 app = FastAPI()
 
 # Atualize APP_VERSION junto com o VERSION do index.html a cada atualização
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 STARTED_AT = datetime.now(timezone.utc).isoformat()
 
 # Chave para redefinir senhas (configure ADMIN_KEY no Render; sem ela a rota fica desligada)
 ADMIN_KEY = os.getenv("ADMIN_KEY")
+
+# Contas de administrador (nomes separados por vírgula). Esses nomes são reservados.
+ADMINS = {n.strip().lower() for n in os.getenv("ADMIN_USERS", "adm").split(",") if n.strip()}
 
 app.add_middleware(
     CORSMiddleware,
@@ -138,6 +146,8 @@ def auth_player(username: str, authorization: Optional[str], db: Session) -> Pla
     player = db.query(PlayerModel).filter(PlayerModel.username == username.strip().lower()).first()
     if not player or not same(player.token, token):
         raise HTTPException(401, "Sessão inválida. Entre novamente.")
+    if is_banned(player):
+        raise HTTPException(403, ban_msg(player))
     return player
 
 
@@ -146,10 +156,54 @@ def issue_token(player: PlayerModel) -> str:
     return player.token
 
 
+# ---------- Banimento e ações do administrador ----------
+PERM_BAN = 2147483647
+BRT = timezone(timedelta(hours=-3))
+
+
+def is_banned(p: PlayerModel) -> bool:
+    return bool(p.banned_until) and p.banned_until > time.time()
+
+
+def ban_msg(p: PlayerModel) -> str:
+    motivo = f" Motivo: {p.ban_reason}." if p.ban_reason else ""
+    if p.banned_until >= PERM_BAN:
+        return "Conta banida permanentemente." + motivo
+    ate = datetime.fromtimestamp(p.banned_until, BRT).strftime("%d/%m/%Y %H:%M")
+    return f"Conta banida até {ate} (horário de Brasília)." + motivo
+
+
+def apply_pending(player: PlayerModel) -> bool:
+    """Aplica no save as ações que o administrador deixou na fila. True se mudou algo."""
+    acts = player.pending or []
+    if not acts or not isinstance(player.data, dict):
+        return False
+    d = dict(player.data)
+    inv = dict(d.get("inv") or {})
+    for a in acts:
+        t = a.get("t")
+        if t == "item":
+            inv[a["id"]] = max(0, int(inv.get(a["id"], 0)) + int(a["q"]))
+        elif t == "gold":
+            d["gold"] = max(0, float(d.get("gold", 0)) + int(a["q"]))
+        elif t == "level":
+            novo, antigo = int(a["v"]), int(d.get("level", 1))
+            d["level"], d["xp"] = novo, 0
+            if novo > antigo:
+                d["pts"] = int(d.get("pts", 0)) + 3 * (novo - antigo)
+    d["inv"] = inv
+    player.data = d
+    player.level = int(d.get("level", 1))
+    player.pending = []
+    return True
+
+
 # Rota 0: criar conta
 @app.post("/api/register")
 def register(c: Credentials, db: Session = Depends(get_db)):
     u = clean_credentials(c)
+    if u in ADMINS:
+        raise HTTPException(403, "Esse nome é reservado.")
     player = db.query(PlayerModel).filter(PlayerModel.username == u).first()
     if player and player.pw_hash:
         raise HTTPException(409, "Esse usuário já existe. Escolha outro nome.")
@@ -176,14 +230,18 @@ def login(c: Credentials, db: Session = Depends(get_db)):
         FAILS[u] = (FAILS.get(u, (0, 0.0))[0] + 1, time.time())
         raise HTTPException(401, "Usuário ou senha incorretos.")
     if not player.pw_hash:  # conta antiga, sem senha: a primeira senha informada passa a valer
+        if u in ADMINS:
+            raise HTTPException(403, "Conta de administrador ainda não foi configurada.")
         player.pw_hash = hash_pw(c.password)
     elif not check_pw(c.password, player.pw_hash):
         FAILS[u] = (FAILS.get(u, (0, 0.0))[0] + 1, time.time())
         raise HTTPException(401, "Usuário ou senha incorretos.")
     FAILS.pop(u, None)
+    if is_banned(player):
+        raise HTTPException(403, ban_msg(player))
     token = issue_token(player)
     db.commit()
-    return {"token": token}
+    return {"token": token, "admin": u in ADMINS}
 
 
 # Rota 1: Salvar ou Atualizar Progresso
@@ -204,18 +262,22 @@ def save_game(payload: dict, authorization: Optional[str] = Header(None), db: Se
     player.level = int(player_data.get("level", 1))
     player.cp = int(player_data.get("cp", 0))
     player.data = player_data
+    applied = apply_pending(player)  # ações do administrador entram aqui
 
     db.commit()
-    return {"status": "sucesso", "message": "Dados salvos no banco de dados!"}
+    return {"status": "sucesso", "updated": player.data if applied else None}
 
 
 # Rota 2: Carregar Progresso do Banco
 @app.get("/api/load/{username}")
 def load_game(username: str, authorization: Optional[str] = Header(None), db: Session = Depends(get_db)):
     player = auth_player(username, authorization, db)
+    if apply_pending(player):
+        db.commit()
+    admin = player.username in ADMINS
     if not player.data:
-        return {"status": "novo", "player_data": None}
-    return {"status": "encontrado", "player_data": player.data}
+        return {"status": "novo", "player_data": None, "admin": admin}
+    return {"status": "encontrado", "player_data": player.data, "admin": admin}
 
 
 # Rota 3: Ranking Global Real (público)
@@ -231,7 +293,7 @@ def get_ranking(db: Session = Depends(get_db)):
             "cls": p.data.get("cls", "guerreiro"),
         }
         for p in players
-        if p.data
+        if p.data and p.username not in ADMINS and not is_banned(p)
     ][:20]
 
 
@@ -253,10 +315,138 @@ def admin_reset(b: ResetBody, x_admin_key: Optional[str] = Header(None), db: Ses
         raise HTTPException(403, "Não autorizado.")
     if not (4 <= len(b.new_password) <= 128):
         raise HTTPException(400, "A senha precisa ter de 4 a 128 caracteres.")
-    player = db.query(PlayerModel).filter(PlayerModel.username == b.username.strip().lower()).first()
+    u = b.username.strip().lower()
+    player = db.query(PlayerModel).filter(PlayerModel.username == u).first()
     if not player:
-        raise HTTPException(404, "Jogador não encontrado.")
+        if u not in ADMINS:
+            raise HTTPException(404, "Jogador não encontrado.")
+        player = PlayerModel(username=u)  # é assim que a conta de administrador é criada
+        db.add(player)
     player.pw_hash = hash_pw(b.new_password)
     player.token = None  # derruba a sessão aberta
     db.commit()
     return {"status": "ok", "message": f"Senha de {player.username} redefinida."}
+
+
+# ---------- Painel do administrador (só contas em ADMIN_USERS) ----------
+def require_admin(authorization: Optional[str], db: Session) -> PlayerModel:
+    token = (authorization or "").replace("Bearer ", "", 1).strip()
+    p = db.query(PlayerModel).filter(PlayerModel.token == token).first() if token else None
+    if not p or p.username not in ADMINS or not same(p.token, token):
+        raise HTTPException(403, "Acesso restrito ao administrador.")
+    return p
+
+
+def get_target(db: Session, username: str) -> PlayerModel:
+    t = db.query(PlayerModel).filter(PlayerModel.username == username.strip().lower()).first()
+    if not t:
+        raise HTTPException(404, "Jogador não encontrado.")
+    return t
+
+
+class AdminAction(BaseModel):
+    username: str
+    t: str                      # "item", "gold" ou "level"
+    id: Optional[str] = None    # item
+    q: Optional[int] = None     # quantidade (item/ouro); negativo remove
+    v: Optional[int] = None     # nível
+
+
+class BanBody(BaseModel):
+    username: str
+    reason: str = ""
+    hours: int = 0              # 0 = permanente
+
+
+class UserBody(BaseModel):
+    username: str
+
+
+@app.get("/api/admin/players")
+def admin_players(q: str = "", authorization: Optional[str] = Header(None), db: Session = Depends(get_db)):
+    require_admin(authorization, db)
+    query = db.query(PlayerModel)
+    if q.strip():
+        query = query.filter(PlayerModel.username.contains(q.strip().lower()))
+    rows = query.order_by(PlayerModel.username).limit(200).all()
+    return [{"u": p.username, "l": p.level or 1, "cp": p.cp or 0,
+             "banned": is_banned(p), "admin": p.username in ADMINS} for p in rows]
+
+
+@app.get("/api/admin/player/{username}")
+def admin_player(username: str, authorization: Optional[str] = Header(None), db: Session = Depends(get_db)):
+    require_admin(authorization, db)
+    t = get_target(db, username)
+    return {"username": t.username, "banned": is_banned(t),
+            "ban_msg": ban_msg(t) if is_banned(t) else "",
+            "pending": len(t.pending or []), "data": t.data}
+
+
+@app.post("/api/admin/action")
+def admin_action(b: AdminAction, authorization: Optional[str] = Header(None), db: Session = Depends(get_db)):
+    require_admin(authorization, db)
+    t = get_target(db, b.username)
+    if b.t == "item":
+        if not b.id or not re.match(r"^[a-z0-9_]{1,30}$", b.id) or not b.q or abs(b.q) > 1_000_000:
+            raise HTTPException(400, "Item ou quantidade inválidos.")
+        act = {"t": "item", "id": b.id, "q": b.q}
+    elif b.t == "gold":
+        if not b.q or abs(b.q) > 1_000_000_000:
+            raise HTTPException(400, "Quantidade inválida.")
+        act = {"t": "gold", "q": b.q}
+    elif b.t == "level":
+        if b.v is None or not (1 <= b.v <= 1000):
+            raise HTTPException(400, "Nível deve ficar entre 1 e 1000.")
+        act = {"t": "level", "v": b.v}
+    else:
+        raise HTTPException(400, "Ação desconhecida.")
+    t.pending = list(t.pending or []) + [act]
+    db.commit()
+    return {"status": "ok", "pending": len(t.pending)}
+
+
+@app.post("/api/admin/ban")
+def admin_ban(b: BanBody, authorization: Optional[str] = Header(None), db: Session = Depends(get_db)):
+    require_admin(authorization, db)
+    t = get_target(db, b.username)
+    if t.username in ADMINS:
+        raise HTTPException(400, "Não é possível banir um administrador.")
+    hours = max(0, min(b.hours, 24 * 365 * 5))
+    t.banned_until = PERM_BAN if hours == 0 else int(time.time() + hours * 3600)
+    t.ban_reason = b.reason.strip()[:200]
+    t.token = None  # derruba a sessão aberta
+    db.commit()
+    return {"status": "ok"}
+
+
+@app.post("/api/admin/unban")
+def admin_unban(b: UserBody, authorization: Optional[str] = Header(None), db: Session = Depends(get_db)):
+    require_admin(authorization, db)
+    t = get_target(db, b.username)
+    t.banned_until = None
+    t.ban_reason = None
+    db.commit()
+    return {"status": "ok"}
+
+
+@app.post("/api/admin/set-password")
+def admin_set_password(b: ResetBody, authorization: Optional[str] = Header(None), db: Session = Depends(get_db)):
+    require_admin(authorization, db)
+    if not (4 <= len(b.new_password) <= 128):
+        raise HTTPException(400, "A senha precisa ter de 4 a 128 caracteres.")
+    t = get_target(db, b.username)
+    t.pw_hash = hash_pw(b.new_password)
+    t.token = None
+    db.commit()
+    return {"status": "ok"}
+
+
+@app.post("/api/admin/delete")
+def admin_delete(b: UserBody, authorization: Optional[str] = Header(None), db: Session = Depends(get_db)):
+    require_admin(authorization, db)
+    t = get_target(db, b.username)
+    if t.username in ADMINS:
+        raise HTTPException(400, "Não é possível excluir um administrador.")
+    db.delete(t)
+    db.commit()
+    return {"status": "ok"}
