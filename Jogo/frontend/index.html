@@ -85,12 +85,14 @@ async function persist(){
  const d=DB();if(d[U]){d[U].p=P;W(d)}
  try {
   P.cp = stats().cp | 0;
-   await fetch('https://rpg-1-vizh.onrender.com/api/save', {
+  const res = await fetch('https://rpg-1-vizh.onrender.com/api/save', {
    method: 'POST',
    headers: { 'Content-Type': 'application/json' },
-   body: JSON.stringify({ username: U, player_data: P })
+   body: JSON.stringify({ username: U, player_data: P }),
+   keepalive: true
   });
- } catch(e) { }
+  if(!res.ok) console.warn('Falha ao salvar no servidor:', res.status);
+ } catch(e) { console.warn('Servidor indisponível, salvo só localmente.', e); }
 }
 
 /* ===== Dados do jogo ===== */
@@ -164,8 +166,10 @@ async function enter(u){
  try {
   const res = await fetch(`https://rpg-1-vizh.onrender.com/api/load/${u}`);
   const data = await res.json();
-  if(data.status === 'encontrado' && data.player_data) P = data.player_data;
-  else P = DB()[u]?DB()[u].p:null;
+  const remote = (data.status === 'encontrado' && data.player_data) ? data.player_data : null;
+  const local = DB()[u] ? DB()[u].p : null;
+  // usa o save mais novo (campo "last"), em vez de sempre confiar no servidor
+  P = (remote && local) ? ((local.last||0) > (remote.last||0) ? local : remote) : (remote || local);
  } catch(e) {
   P = DB()[u]?DB()[u].p:null;
  }
@@ -173,7 +177,7 @@ async function enter(u){
  P.eq=Object.assign({arma:null,armadura:null,elmo:null,acessorio:null,aura:null},P.eq);if(P.eq.anel!==undefined){P.eq.acessorio=P.eq.acessorio||P.eq.anel;delete P.eq.anel}
  const t0=P.last,g=P.gold,l=P.level;tick();
  if(Date.now()-t0>6e4&&P.act)toast('⏳ Enquanto você esteve fora: +'+Math.floor(P.gold-g)+' ouro e +'+(P.level-l)+' nível(is).');
- dash();loop()
+ dash();loop();checkNews()
 }
 function logout(){tick();persist();clearInterval(T);S.del('eld_ses');U=P=null;mode='in';authScreen()}
 
@@ -200,7 +204,7 @@ const bar=(id,bg)=>`<div class="bar"><i id="${id}" style="background:${bg}"></i>
 const sb=(id,v,m)=>{$('#'+id).style.width=Math.min(100,v/m*100)+'\%';$('#'+id+'t').textContent=Math.floor(v)+' / '+Math.floor(m)};
 const rates=z=>{const s=stats();return`<span>✨ XP +${f(z.xp*s.xm)}/s</span>`+(z.g?`<span>💰 Ouro +${f(z.g*s.gm)}/s</span><span>❤️ Vida −${f(z.dg*s.vr*risk(z)/100,2)}/s</span>${rk(z)}`:'')};
 function dash(){
- $('#app').innerHTML=`<header class="flex items-center justify-between mb-4"><h1 class="fd text-xl sm:text-2xl gold">🏰 Crônicas de Eldoria</h1><div class="flex items-center gap-3"><span class="mut hidden sm:inline">${U}</span><button class="btn sm" id="snd" onclick="togSnd()">${snd?'🔊':'🔇'}</button><button class="btn sm" onclick="logout()">Sair</button></div></header>
+ $('#app').innerHTML=`<header class="flex items-center justify-between mb-4"><h1 class="fd text-xl sm:text-2xl gold">🏰 Crônicas de Eldoria</h1><div class="flex items-center gap-3"><span class="mut hidden sm:inline">${U}</span><button class="btn sm" onclick="showNews()" title="Novidades e status do servidor">📜</button><button class="btn sm" id="snd" onclick="togSnd()">${snd?'🔊':'🔇'}</button><button class="btn sm" onclick="logout()">Sair</button></div></header>
  <div class="grid gap-4 lg:grid-cols-[340px_1fr]"><aside class="panel p-5 h-fit" id="side"></aside><main class="panel p-5 min-w-0"><div id="act"></div><div id="skb" class="flex gap-2 mt-2"></div><nav class="flex gap-2 overflow-x-auto pb-2 my-3" id="tabs"></nav><section id="tab"></section><h3 class="fd gold mt-5 mb-1">Registro de combate</h3><div id="log" class="row p-3 h-40 overflow-y-auto"></div></main></div>`;
  refresh()
 }
@@ -344,6 +348,36 @@ $('#app').addEventListener('keydown',e=>{if(e.key==='Enter'&&$('#u'))auth()});
 addEventListener('visibilitychange',()=>{if(P){tick();persist()}});
 addEventListener('pagehide',()=>{if(P){tick();persist()}});
 for(let i=0;i<16;i++){const e=document.createElement('i'),z=2+Math.random()*3;e.className='ember';e.style.cssText=`left:${Math.random()*100}%;width:${z}px;height:${z}px;animation-duration:${7+Math.random()*9}s;animation-delay:${-Math.random()*12}s`;document.body.append(e)}
+/* ===== Novidades / status do servidor ===== */
+const SRV='https://rpg-1-vizh.onrender.com',VERSION='1.1.0';
+// Para cada atualização: aumente VERSION e adicione uma linha NO TOPO desta lista
+const NEWS=[
+ ['1.1.0','11/11/2026',['Correção: o progresso não volta mais ao sair do jogo','Salvamento mais seguro (usa sempre o save mais novo)','Novo painel de novidades e status do servidor']]
+];
+async function showNews(){
+ let m=$('#news');if(m){m.remove();return}
+ m=document.createElement('div');m.id='news';
+ m.style.cssText='position:fixed;inset:0;z-index:70;display:grid;place-items:center;padding:1rem;background:#000c';
+ m.onclick=e=>{if(e.target===m)m.remove()};
+ m.innerHTML=`<div class='panel p-6 w-full max-w-md' style='max-height:85vh;overflow:auto'><div class='flex justify-between items-center mb-3'><h3 class='fd gold text-xl'>📜 Novidades</h3><button class='btn sm' onclick='$("#news").remove()'>Fechar</button></div><div id='srv' class='row p-3 text-sm mb-4 mut'>Verificando servidor...</div>${NEWS.map(n=>`<div class='mb-3'><b class='gold'>v${n[0]}</b> <span class='mut text-sm'>${n[1]}</span><ul class='text-sm' style='list-style:disc;padding-left:1.2rem'>${n[2].map(x=>`<li>${x}</li>`).join('')}</ul></div>`).join('')}</div>`;
+ document.body.append(m);
+ const box=$('#srv');
+ try{
+  const v=await(await fetch(SRV+'/api/version')).json();
+  const diff=v.version!==VERSION?`<br>⚠️ Jogo v${VERSION} e servidor v${v.version} estão em versões diferentes. Se acabou de subir uma atualização, aguarde o deploy.`:'';
+  const sql=v.db==='sqlite'?`<br>⚠️ Banco SQLite: no Render os dados podem ser apagados. Configure o DATABASE_URL.`:'';
+  if(box)box.innerHTML=`🟢 Servidor online<br>Jogo: v${VERSION} · Servidor: v${v.version} · commit ${v.commit}<br>Banco: ${v.db} · ligado desde ${new Date(v.started_at).toLocaleString('pt-BR')}${diff}${sql}`;
+ }catch(e){if(box)box.innerHTML=`🔴 Servidor offline ou acordando (o Render grátis demora cerca de 1 min). Tente de novo.`}
+}
+async function checkNews(){
+ const old=S.get('eld_ver');S.set('eld_ver',VERSION);
+ if(old&&old!==VERSION){toast('🆕 Atualização v'+VERSION+'! Veja as novidades em 📜');showNews()}
+ try{
+  const v=await(await fetch(SRV+'/api/version')).json(),k=v.version+'|'+v.commit,o=S.get('eld_srv');S.set('eld_srv',k);
+  if(o&&o!==k)toast('🛠️ Servidor atualizado (v'+v.version+', commit '+v.commit+')');
+ }catch(e){}
+}
+
 const ses=S.get('eld_ses');DB()[ses]?enter(ses):authScreen();
 </script>
 </body>
