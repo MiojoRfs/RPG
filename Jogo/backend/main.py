@@ -1,4 +1,5 @@
 import os
+from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -39,6 +40,10 @@ Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
 
+# Atualize APP_VERSION junto com o VERSION do index.html a cada atualização
+APP_VERSION = "1.1.0"
+STARTED_AT = datetime.now(timezone.utc).isoformat()
+
 # Permite que seu Front-end (Netlify / Live Server) converse com essa API sem bloqueios de CORS
 app.add_middleware(
     CORSMiddleware,
@@ -69,6 +74,10 @@ def save_game(payload: dict, db: Session = Depends(get_db)):
         player = PlayerModel(username=username)
         db.add(player)
     
+    # Não deixa um save antigo sobrescrever um mais novo
+    if player.data and player.data.get("last", 0) > player_data.get("last", 0):
+        return {"status": "ignorado", "message": "Save mais antigo que o do servidor"}
+
     player.level = player_data.get("level", 1)
     player.cp = player_data.get("cp", 0)
     player.data = player_data
@@ -98,3 +107,14 @@ def get_ranking(db: Session = Depends(get_db)):
         }
         for p in players
     ]
+
+
+# Rota 4: Versão e status do servidor (usada pelo painel de novidades do jogo)
+@app.get("/api/version")
+def version():
+    return {
+        "version": APP_VERSION,
+        "commit": (os.getenv("RENDER_GIT_COMMIT") or "local")[:7],
+        "started_at": STARTED_AT,
+        "db": "sqlite" if "sqlite" in DATABASE_URL else "postgres",
+    }
